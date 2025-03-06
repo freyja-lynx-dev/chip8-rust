@@ -1,8 +1,18 @@
+use std::{
+    sync::{
+        atomic::{AtomicBool, AtomicU8, Ordering},
+        mpsc, Arc,
+    },
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
+};
+
 const RAM_SIZE: usize = 4096;
 const REGISTER_COUNT: usize = 16;
 const STACK_SIZE: u8 = 16;
-const RUNLOOP_TIMER_DEFAULT: usize = 8;
+const RUNLOOP_TIMER_DEFAULT: u8 = 8;
 const PROGRAM_START: usize = 0x200;
+const TIMER_INTERVAL: Duration = Duration::from_micros(16_667);
 
 #[derive(Debug)]
 pub struct Stack {
@@ -35,6 +45,70 @@ impl Stack {
             self.p -= 1;
             Ok(self.memory[self.p as usize])
         }
+    }
+}
+
+pub struct Timers {
+    delay_timer: Arc<AtomicU8>,
+    sound_timer: Arc<AtomicU8>,
+    timer_handle: Option<JoinHandle<()>>,
+    stop_flag: Arc<AtomicBool>,
+}
+
+impl Timers {
+    pub fn new() -> Timers {
+        Timers {
+            delay_timer: Arc::new(AtomicU8::new(RUNLOOP_TIMER_DEFAULT)),
+            sound_timer: Arc::new(AtomicU8::new(RUNLOOP_TIMER_DEFAULT)),
+            timer_handle: None,
+            stop_flag: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn start(&mut self) {
+        let mut last_update = Instant::now();
+        let delay_timer = Arc::clone(&self.delay_timer);
+        let sound_timer = Arc::clone(&self.sound_timer);
+        let stop_flag = Arc::clone(&self.stop_flag);
+        self.timer_handle = Some(thread::spawn(move || {
+            while !stop_flag.load(Ordering::Relaxed) {
+                let now = Instant::now();
+                if now - last_update >= TIMER_INTERVAL {
+                    if delay_timer.load(Ordering::SeqCst) > 0 {
+                        delay_timer.fetch_sub(1, Ordering::SeqCst);
+                    }
+                    if sound_timer.load(Ordering::SeqCst) > 0 {
+                        sound_timer.fetch_sub(1, Ordering::SeqCst);
+                    }
+                    last_update = now;
+                }
+            }
+        }));
+    }
+
+    pub fn teardown(&mut self) -> Result<(), &str> {
+        self.stop_flag.store(true, Ordering::Relaxed);
+        if self.timer_handle.is_some() {
+            self.timer_handle
+                .take()
+                .unwrap()
+                .join()
+                .map_err(|_| "thread panicked")
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn retrieve_delay_timer(&self) -> u8 {
+        self.delay_timer.load(Ordering::SeqCst)
+    }
+
+    pub fn set_delay_timer(&self, value: u8) {
+        self.delay_timer.store(value, Ordering::SeqCst);
+    }
+
+    pub fn set_sound_timer(&self, value: u8) {
+        self.sound_timer.store(value, Ordering::SeqCst);
     }
 }
 
@@ -87,5 +161,23 @@ mod tests {
             assert!(stack.push(i as u16).is_ok());
         }
         assert!(stack.push(0xEF).is_err());
+    }
+
+    #[test]
+    fn timer_works() {
+        let mut timers = Timers::new();
+        timers.set_delay_timer(30);
+        timers.set_sound_timer(240);
+        timers.start();
+        thread::sleep(Duration::from_millis(500));
+        assert_eq!(
+            timers.retrieve_delay_timer(),
+            0,
+            "timer does not count down as expected"
+        );
+        assert!(
+            timers.teardown().is_ok(),
+            "timer thread is not safely joined"
+        );
     }
 }
