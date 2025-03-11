@@ -1,3 +1,4 @@
+mod clock;
 mod display;
 mod system;
 

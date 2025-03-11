@@ -1,12 +1,13 @@
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicU8, Ordering},
-        mpsc, Arc,
+        Arc,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
+// TODO: most of these should be configurable
 const RAM_SIZE: usize = 4096;
 const REGISTER_COUNT: usize = 16;
 const STACK_SIZE: u8 = 16;
@@ -14,6 +15,7 @@ const RUNLOOP_TIMER_DEFAULT: u8 = 8;
 const PROGRAM_START: usize = 0x200;
 const TIMER_INTERVAL: Duration = Duration::from_micros(16_667);
 
+/// A stack component built on top of a fixed-size array with Result<> types to prevent overflows and underflows.
 #[derive(Debug)]
 pub struct Stack {
     memory: [u16; STACK_SIZE as usize],
@@ -27,6 +29,7 @@ impl Stack {
             p: 0,
         }
     }
+    /// Pushes a value onto the stack. On error, it will give you the stack pointer.
     pub fn push(&mut self, value: u16) -> Result<(), u8> {
         if self.p >= STACK_SIZE {
             Err(self.p)
@@ -36,6 +39,7 @@ impl Stack {
             Ok(())
         }
     }
+    /// Pops a value from the stack, giving you the value if successful, or the stack pointer if unsuccessful.
     pub fn pop(&mut self) -> Result<u16, u8> {
         if self.p == 0 {
             Err(0)
@@ -48,6 +52,8 @@ impl Stack {
     }
 }
 
+/// A timer component that meets Chip8 specifications, and a thread to guarantee a 60hz clock cycle.
+/// Must be `start()`ed before use, and must be `teardown()`ed after use.
 pub struct Timers {
     delay_timer: Arc<AtomicU8>,
     sound_timer: Arc<AtomicU8>,
@@ -64,7 +70,10 @@ impl Timers {
             stop_flag: Arc::new(AtomicBool::new(false)),
         }
     }
-
+    /// Starts the timer.
+    ///
+    /// This function starts a thread that will update every 1/60th of a second, subtracting one from
+    /// nonzero values of the delay and sound timers. The thread can be terminated with `teardown()`.
     pub fn start(&mut self) {
         let mut last_update = Instant::now();
         let delay_timer = Arc::clone(&self.delay_timer);
@@ -86,6 +95,7 @@ impl Timers {
         }));
     }
 
+    /// Stops the timer.
     pub fn teardown(&mut self) -> Result<(), &str> {
         self.stop_flag.store(true, Ordering::Relaxed);
         if self.timer_handle.is_some() {
