@@ -145,6 +145,8 @@ mod tests {
                 for thread in threads {
                     assert_eq!(thread.join().unwrap(), 21);
                 }
+            } else {
+                assert!(false, "could not register listeners")
             }
         } else {
             assert!(false, "could not register listeners")

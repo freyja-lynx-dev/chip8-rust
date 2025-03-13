@@ -1,6 +1,7 @@
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicU8, Ordering},
+        mpsc::Receiver,
         Arc,
     },
     thread::{self, JoinHandle},
@@ -58,7 +59,6 @@ pub struct Timers {
     delay_timer: Arc<AtomicU8>,
     sound_timer: Arc<AtomicU8>,
     timer_handle: Option<JoinHandle<()>>,
-    stop_flag: Arc<AtomicBool>,
 }
 
 impl Timers {
@@ -67,29 +67,24 @@ impl Timers {
             delay_timer: Arc::new(AtomicU8::new(RUNLOOP_TIMER_DEFAULT)),
             sound_timer: Arc::new(AtomicU8::new(RUNLOOP_TIMER_DEFAULT)),
             timer_handle: None,
-            stop_flag: Arc::new(AtomicBool::new(false)),
         }
     }
     /// Starts the timer.
     ///
     /// This function starts a thread that will update every 1/60th of a second, subtracting one from
     /// nonzero values of the delay and sound timers. The thread can be terminated with `teardown()`.
-    pub fn start(&mut self) {
-        let mut last_update = Instant::now();
+    pub fn start(&mut self, tick_rx: Receiver<()>) {
         let delay_timer = Arc::clone(&self.delay_timer);
         let sound_timer = Arc::clone(&self.sound_timer);
-        let stop_flag = Arc::clone(&self.stop_flag);
         self.timer_handle = Some(thread::spawn(move || {
-            while !stop_flag.load(Ordering::Relaxed) {
-                let now = Instant::now();
-                if now - last_update >= TIMER_INTERVAL {
-                    if delay_timer.load(Ordering::SeqCst) > 0 {
-                        delay_timer.fetch_sub(1, Ordering::SeqCst);
-                    }
-                    if sound_timer.load(Ordering::SeqCst) > 0 {
-                        sound_timer.fetch_sub(1, Ordering::SeqCst);
-                    }
-                    last_update = now;
+            println!("timer thread started");
+            while let Ok(_) = tick_rx.recv() {
+                println!("timer tick");
+                if delay_timer.load(Ordering::SeqCst) > 0 {
+                    delay_timer.fetch_sub(1, Ordering::SeqCst);
+                }
+                if sound_timer.load(Ordering::SeqCst) > 0 {
+                    sound_timer.fetch_sub(1, Ordering::SeqCst);
                 }
             }
         }));
@@ -97,7 +92,6 @@ impl Timers {
 
     /// Stops the timer.
     pub fn teardown(&mut self) -> Result<(), &str> {
-        self.stop_flag.store(true, Ordering::Relaxed);
         if self.timer_handle.is_some() {
             self.timer_handle
                 .take()
@@ -149,6 +143,8 @@ impl CPU {
 
 #[cfg(test)]
 mod tests {
+    use crate::clock::Clock;
+
     use super::*;
 
     #[test]
@@ -175,15 +171,24 @@ mod tests {
 
     #[test]
     fn timer_works() {
+        let mut clock = Clock::new(TIMER_INTERVAL);
         let mut timers = Timers::new();
         timers.set_delay_timer(30);
         timers.set_sound_timer(240);
-        timers.start();
+        let tick_rx = clock
+            .become_listener()
+            .expect("failed to create tick receiver");
+        clock.start();
+        timers.start(tick_rx);
         thread::sleep(Duration::from_millis(500));
         assert_eq!(
             timers.retrieve_delay_timer(),
             0,
             "timer does not count down as expected"
+        );
+        assert!(
+            clock.teardown().is_ok(),
+            "clock thread is not safely joined"
         );
         assert!(
             timers.teardown().is_ok(),
